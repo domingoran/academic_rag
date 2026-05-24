@@ -60,13 +60,8 @@ _TEXT_LABELS = {
 # Milvus VARCHAR(8192) limit
 _MAX_CONTENT_CHARS = 8_000
 
-# Words of surrounding prose to stitch into table / figure / equation chunks
-_CONTEXT_WORDS = 50
-
-# Table markdown is capped at this before context is added so the header rows
-# always survive and context snippets are never silently cut off by the
-# _MAX_CONTENT_CHARS limit.
-_MAX_TABLE_MARKDOWN_CHARS = 6_000
+# _CONTEXT_WORDS and _MAX_TABLE_MARKDOWN_CHARS live in config so they can be
+# tuned centrally.  Import them via the config module (see usages below).
 
 # Regex that matches the separator row of a Markdown table: |---|---|
 _TABLE_SEP_RE = re.compile(r'\|[-| :]+\|\s*\n')
@@ -111,31 +106,33 @@ def _split_text(text: str, max_tokens: int, overlap_tokens: int) -> List[str]:
 
 def _preceding_context(text_buffer: List[str]) -> str:
     """
-    Return the last _CONTEXT_WORDS words from the accumulated text buffer
-    without modifying it.
+    Return the last config.CONTEXT_WORDS words from the accumulated text
+    buffer without modifying it.
     """
     all_text = " ".join(text_buffer)
     words    = all_text.split()
     if not words:
         return ""
-    return " ".join(words[-_CONTEXT_WORDS:])
+    return " ".join(words[-config.CONTEXT_WORDS:])
 
 
 def _following_context(elements: List[RawElement], start_idx: int) -> str:
     """
-    Look ahead from *start_idx* in *elements* and collect up to _CONTEXT_WORDS
-    words from TEXT-like elements.  Stops at a section header.
+    Look ahead from *start_idx* in *elements* and collect up to
+    config.CONTEXT_WORDS words from TEXT-like elements.  Stops at a section
+    header.  No fixed element-count cap — iterates until the word budget is
+    met, a section header is encountered, or elements end.
     """
     collected: List[str] = []
-    for j in range(start_idx + 1, min(start_idx + 20, len(elements))):
+    for j in range(start_idx + 1, len(elements)):
         el = elements[j]
         if el.label in _SECTION_LABELS:
             break
         if el.label in _TEXT_LABELS and el.text:
             collected.extend(el.text.split())
-            if len(collected) >= _CONTEXT_WORDS:
+            if len(collected) >= config.CONTEXT_WORDS:
                 break
-    return " ".join(collected[:_CONTEXT_WORDS])
+    return " ".join(collected[:config.CONTEXT_WORDS])
 
 
 def _with_context(core: str, preceding: str, following: str) -> str:
@@ -165,12 +162,13 @@ def _with_context(core: str, preceding: str, following: str) -> str:
 
 def _truncate_table_markdown(markdown: str) -> str:
     """
-    If *markdown* exceeds _MAX_TABLE_MARKDOWN_CHARS, keep the header rows and
-    as many data rows as fit, then append a row-count truncation note.
+    If *markdown* exceeds config.MAX_TABLE_MARKDOWN_CHARS, keep the header
+    rows and as many data rows as fit, then append a row-count truncation note.
 
     Falls back to plain character truncation if no Markdown header is found.
     """
-    if len(markdown) <= _MAX_TABLE_MARKDOWN_CHARS:
+    limit = config.MAX_TABLE_MARKDOWN_CHARS
+    if len(markdown) <= limit:
         return markdown
 
     match = _TABLE_SEP_RE.search(markdown)
@@ -179,7 +177,7 @@ def _truncate_table_markdown(markdown: str) -> str:
         header     = markdown[:header_end]
         rows       = [r for r in markdown[header_end:].splitlines() if r.strip()]
 
-        budget   = _MAX_TABLE_MARKDOWN_CHARS - len(header) - 40   # room for note
+        budget   = limit - len(header) - 40   # room for truncation note
         included: List[str] = []
         used = 0
         for row in rows:
@@ -196,7 +194,7 @@ def _truncate_table_markdown(markdown: str) -> str:
         return result
 
     # No recognisable Markdown header — plain truncate
-    return markdown[:_MAX_TABLE_MARKDOWN_CHARS] + "\n[... truncated]"
+    return markdown[:limit] + "\n[... truncated]"
 
 
 # ---------------------------------------------------------------------------
@@ -297,9 +295,6 @@ def chunk_document(parsed_doc: ParsedDocument) -> List[Chunk]:
         # → context-stitched standalone chunk with smart truncation        #
         # ---------------------------------------------------------------- #
         if elem.label == DocItemLabel.TABLE.value:
-            table_counter += 1
-            table_id = f"tbl-{table_counter}"
-
             pre = _preceding_context(text_buffer)
             _flush_text_buffer(current_section, page)
             fol = _following_context(elements, i)
@@ -312,8 +307,9 @@ def chunk_document(parsed_doc: ParsedDocument) -> List[Chunk]:
             core = "\n\n".join(core_parts).strip()
 
             if core:
+                table_counter += 1
                 content = _with_context(core, pre, fol)
-                meta    = ChunkMetadata(page=page, table_id=table_id)
+                meta    = ChunkMetadata(page=page, table_id=f"tbl-{table_counter}")
                 chunks.append(_make_chunk("table", content, current_section, page, meta))
             continue
 
@@ -324,9 +320,6 @@ def chunk_document(parsed_doc: ParsedDocument) -> List[Chunk]:
         #   is available                                                    #
         # ---------------------------------------------------------------- #
         if elem.label == DocItemLabel.PICTURE.value:
-            figure_counter += 1
-            figure_id = f"fig-{figure_counter}"
-
             pre = _preceding_context(text_buffer)
             _flush_text_buffer(current_section, page)
             fol = _following_context(elements, i)
@@ -339,8 +332,9 @@ def chunk_document(parsed_doc: ParsedDocument) -> List[Chunk]:
 
             # Only discard when there is truly nothing useful to embed
             if elem.caption or pre or fol:
+                figure_counter += 1
                 content = _with_context(core, pre, fol)
-                meta    = ChunkMetadata(page=page, figure_id=figure_id)
+                meta    = ChunkMetadata(page=page, figure_id=f"fig-{figure_counter}")
                 chunks.append(_make_chunk("figure", content, current_section, page, meta))
             continue
 
@@ -351,17 +345,15 @@ def chunk_document(parsed_doc: ParsedDocument) -> List[Chunk]:
         #       the surrounding text flow must continue uninterrupted.     #
         # ---------------------------------------------------------------- #
         if elem.label == DocItemLabel.FORMULA.value:
-            equation_counter += 1
-            equation_id = f"eq-{equation_counter}"
-
             pre = _preceding_context(text_buffer)
             fol = _following_context(elements, i)
 
             core = f"Equation: {elem.text}" if elem.text else "Equation"
 
             if elem.text or pre or fol:
+                equation_counter += 1
                 content = _with_context(core, pre, fol)
-                meta    = ChunkMetadata(page=page, equation_id=equation_id)
+                meta    = ChunkMetadata(page=page, equation_id=f"eq-{equation_counter}")
                 chunks.append(_make_chunk("equation", content, current_section, page, meta))
             continue
 

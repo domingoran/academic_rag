@@ -158,7 +158,7 @@ class Chunk(BaseModel):
 
 Tables, figures, and equations alone embed poorly — their meaning lives in the surrounding prose. The chunker now stitches `_CONTEXT_WORDS = 50` words of immediately preceding and following text into every non-text chunk:
 
-```
+```text
 [...attention is computed as a scaled dot-product of queries and keys...]
 
 Table: Comparison of model variants on WMT14 EN-DE
