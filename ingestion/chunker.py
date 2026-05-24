@@ -355,6 +355,13 @@ def chunk_document(parsed_doc: ParsedDocument) -> List[Chunk]:
                 content = _with_context(core, pre, fol)
                 meta    = ChunkMetadata(page=page, equation_id=f"eq-{equation_counter}")
                 chunks.append(_make_chunk("equation", content, current_section, page, meta))
+
+            # Also feed the formula text back into the running text buffer so
+            # that inline formulas don't break the surrounding prose flow.
+            # Example: "…we define attention as <formula> where x is…" should
+            # remain a coherent sentence in the enclosing text chunk.
+            if elem.text:
+                text_buffer.append(elem.text)
             continue
 
         # ---------------------------------------------------------------- #
