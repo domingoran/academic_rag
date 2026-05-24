@@ -1,0 +1,9 @@
+langchain
+pymilvus
+rank-bm25
+ollama
+pydantic
+numpy
+tqdm
+docling
+sentence-transformers

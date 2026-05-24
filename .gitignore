@@ -1,0 +1,38 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+*.whl
+
+# Data — papers and generated indices are local only
+data/papers/*
+!data/papers/__init__.py
+data/bm25_index.pkl
+data/metadata.json
+
+# Milvus local volumes (Docker bind-mount)
+volumes/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment files
+.env
+.env.*
