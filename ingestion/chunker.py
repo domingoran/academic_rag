@@ -77,14 +77,26 @@ _TABLE_SEP_RE = re.compile(r'\|[-| :]+\|\s*\n')
 # ---------------------------------------------------------------------------
 
 def _estimate_tokens(text: str) -> int:
-    """Rough token estimate: 1 token ≈ 0.75 words for English."""
+    """
+    Estimate the token count for an English text using a words-to-tokens heuristic.
+    
+    Returns:
+        int: Estimated number of tokens in `text`, computed as len(text.split()) / 0.75 and truncated to an integer.
+    """
     return int(len(text.split()) / 0.75)
 
 
 def _split_text(text: str, max_tokens: int, overlap_tokens: int) -> List[str]:
     """
-    Split *text* into word-level chunks that stay under *max_tokens*.
-    Adjacent chunks share *overlap_tokens* words for context continuity.
+    Split text into word-based chunks with shared overlap to respect a token budget.
+    
+    Parameters:
+        text (str): Input text to split.
+        max_tokens (int): Target maximum token budget per chunk (word-based splitting).
+        overlap_tokens (int): Number of tokens worth of overlap to include between adjacent chunks.
+    
+    Returns:
+        List[str]: A list of non-empty chunk strings. Returns an empty list if the input is blank or contains only whitespace.
     """
     words = text.split()
     words_per_chunk = max(1, int(max_tokens * 0.75))
@@ -111,8 +123,10 @@ def _split_text(text: str, max_tokens: int, overlap_tokens: int) -> List[str]:
 
 def _preceding_context(text_buffer: List[str]) -> str:
     """
-    Return the last _CONTEXT_WORDS words from the accumulated text buffer
-    without modifying it.
+    Get the last _CONTEXT_WORDS words from the accumulated text buffer as a single space-separated string.
+    
+    Returns:
+        str: The last `_CONTEXT_WORDS` words from `text_buffer` joined by spaces, or an empty string if the buffer contains no words.
     """
     all_text = " ".join(text_buffer)
     words    = all_text.split()
@@ -123,8 +137,14 @@ def _preceding_context(text_buffer: List[str]) -> str:
 
 def _following_context(elements: List[RawElement], start_idx: int) -> str:
     """
-    Look ahead from *start_idx* in *elements* and collect up to _CONTEXT_WORDS
-    words from TEXT-like elements.  Stops at a section header.
+    Collect up to _CONTEXT_WORDS words of prose from elements that follow start_idx, stopping early at the next section header.
+    
+    Parameters:
+        elements (List[RawElement]): Sequence of document elements to scan.
+        start_idx (int): Index to start looking after; scanning begins at start_idx + 1.
+    
+    Returns:
+        str: A single string of up to _CONTEXT_WORDS words drawn from subsequent TEXT-like elements (scanned across at most 20 following elements), stopping if a section header is encountered.
     """
     collected: List[str] = []
     for j in range(start_idx + 1, min(start_idx + 20, len(elements))):
@@ -140,19 +160,16 @@ def _following_context(elements: List[RawElement], start_idx: int) -> str:
 
 def _with_context(core: str, preceding: str, following: str) -> str:
     """
-    Compose the final chunk content by surrounding *core* with prose snippets.
-
-    Example output::
-
-        [...attention is computed as a dot product of the query...]
-
-        Table: Comparison of BLEU scores across architectures
-
-        | Model   | EN-DE | EN-FR |
-        |---------|-------|-------|
-        ...
-
-        [...bold entries indicate statistical significance (p < 0.05)...]
+    Wrap a core text block with optional preceding and following prose snippets for context.
+    
+    Parameters:
+        core (str): Main content to include unmodified.
+        preceding (str): Prose to place before `core`; if non-empty it is wrapped in `[...]`.
+        following (str): Prose to place after `core`; if non-empty it is wrapped in `[...]`.
+    
+    Returns:
+        str: The assembled content where optional preceding and following snippets are each surrounded
+        by `[...]` and separated from the core by blank lines. If a snippet is empty it is omitted.
     """
     parts: List[str] = []
     if preceding:
@@ -165,10 +182,13 @@ def _with_context(core: str, preceding: str, following: str) -> str:
 
 def _truncate_table_markdown(markdown: str) -> str:
     """
-    If *markdown* exceeds _MAX_TABLE_MARKDOWN_CHARS, keep the header rows and
-    as many data rows as fit, then append a row-count truncation note.
-
-    Falls back to plain character truncation if no Markdown header is found.
+    Truncates a Markdown table to fit within the module's character budget while preserving the header and as many data rows as possible.
+    
+    Parameters:
+        markdown (str): The table in Markdown format.
+    
+    Returns:
+        str: The original Markdown if it fits within the character limit; otherwise a truncated Markdown string. If a Markdown separator row is found, the header (through the separator) is preserved and as many following non-empty rows are kept as fit within the budget, with a trailing "[... N rows truncated]" note when rows are dropped. If no header/separator is found, the function returns a character-truncated prefix with a trailing "[... truncated]" note.
     """
     if len(markdown) <= _MAX_TABLE_MARKDOWN_CHARS:
         return markdown
@@ -205,13 +225,19 @@ def _truncate_table_markdown(markdown: str) -> str:
 
 def chunk_document(parsed_doc: ParsedDocument) -> List[Chunk]:
     """
-    Convert a ParsedDocument into a flat list of Chunks.
-
-    Args:
-        parsed_doc: output of the docling parser.
-
+    Split a parsed document into structure-aware chunks suitable for embedding and downstream indexing.
+    
+    Converts the provided ParsedDocument into a flat list of Chunk objects by:
+    - Accumulating prose into section-aware text chunks and splitting them to respect the token budget with overlap.
+    - Emitting standalone, context-stitched chunks for tables, figures, and equations (including surrounding preceding/following prose where available).
+    - Truncating large table markdown intelligently and limiting final chunk content size.
+    - Attaching per-document sequential IDs for tables (tbl-N), figures (fig-N), and equations (eq-N) in chunk metadata.
+    
+    Parameters:
+        parsed_doc (ParsedDocument): Parsed document containing elements, paper metadata, and element-level fields used to build chunks.
+    
     Returns:
-        List of Chunk objects (without embeddings).
+        List[Chunk]: Flat list of Chunk objects (content truncated to module limits; chunks do not include embeddings).
     """
     chunks: List[Chunk] = []
     current_section = "Abstract"   # reasonable default before first header
@@ -237,6 +263,19 @@ def chunk_document(parsed_doc: ParsedDocument) -> List[Chunk]:
         page: int,
         meta: Optional[ChunkMetadata] = None,
     ) -> Chunk:
+        """
+        Create a Chunk populated with the enclosing document's metadata and the supplied content.
+        
+        Parameters:
+            chunk_type (str): Logical type for the chunk (e.g., "text", "table", "figure", "equation").
+            content (str): Chunk body; will be truncated to _MAX_CONTENT_CHARS characters.
+            section (str): Section name to associate with the chunk.
+            page (int): Page number to store in chunk metadata when no explicit metadata is provided.
+            meta (Optional[ChunkMetadata]): Optional metadata override; if omitted, a ChunkMetadata with the provided `page` is used.
+        
+        Returns:
+            Chunk: A Chunk whose paper-level fields are copied from the enclosing parsed document, with the given section, chunk_type, truncated content, and metadata.
+        """
         return Chunk(
             paper_id   = parsed_doc.paper_id,
             title      = parsed_doc.title,
@@ -249,6 +288,15 @@ def chunk_document(parsed_doc: ParsedDocument) -> List[Chunk]:
         )
 
     def _flush_text_buffer(section: str, page: int) -> None:
+        """
+        Flushes the accumulated prose buffer into one or more text chunks for the given section and page.
+        
+        Joins and clears the internal text buffer, splits the resulting string into token-bounded subchunks using the module's chunking configuration, and appends each non-empty subchunk as a "text" Chunk with the provided section and page metadata. This function mutates the shared text_buffer and the chunks list.
+        
+        Parameters:
+            section (str): Section name to assign to created chunks.
+            page (int): Page number to record in each chunk's metadata.
+        """
         nonlocal text_buffer
         if not text_buffer:
             return
