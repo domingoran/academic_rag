@@ -6,7 +6,7 @@ It enables:
 - Ingestion of academic papers from a local folder
 - Structured parsing of PDFs (text, tables, figures, equations, authors)
 - Hybrid retrieval (BM25 + vector search with weighted score fusion)
-- LLM-based reranking via Ollama
+- Cross-encoder reranking via BAAI/bge-reranker-v2-m3
 - Metadata filtering (year, chunk_type, paper_id) at query time
 - Chat-based interaction with citations
 - Modular LLM backend (Ollama-based models)
@@ -51,7 +51,7 @@ HybridSearcher  (retrieval/hybrid_search.py)
       ↓  fuse: 0.6 × vec_norm + 0.4 × bm25_norm
       → TOP_K_RERANK merged candidates
 ↓
-Reranker  (retrieval/reranker.py)        → single Ollama generate() call
+Reranker  (retrieval/reranker.py)        → cross-encoder scoring (bge-reranker-v2-m3)
 ↓
 TOP_K_FINAL chunks
 ↓
@@ -307,18 +307,16 @@ searcher.search(vec, text, expr='year >= 2022 && chunk_type == "text"')
 
 ## 10. Reranking Layer (`retrieval/reranker.py`)
 
-`Reranker` uses a single `OllamaClient.generate()` call to reorder up to `TOP_K_RERANK` candidates.
+`Reranker` uses `sentence_transformers.CrossEncoder` with `BAAI/bge-reranker-v2-m3` to score each (query, passage) pair and return candidates sorted by descending relevance score.
 
-### Prompt strategy
+### Scoring strategy
 
-Sends the query + truncated passage previews (400 chars each) and asks the LLM for a comma-separated ranking of passage numbers (most relevant first).
+Calls `model.predict([(query, passage), ...])` in a single batch — no LLM call, no prompt parsing.
+Model weights are downloaded from HuggingFace on first use (~568 MB) and cached automatically.
 
 ### Robustness
 
-`_parse_ranking()` handles:
-* Perfect LLM responses → exact permutation
-* Partial responses → valid indices placed first, missing ones appended in original order
-* Gibberish / no numbers → original order preserved
+Falls back to the original order on any exception so retrieval never silently degrades.
 
 ### Toggle
 
@@ -332,7 +330,7 @@ Set `RERANKER_ENABLED = False` in `config.py` to skip reranking (faster, lower q
 
 * Wraps the Ollama Python SDK
 * `chat(messages)` — multi-turn with history
-* `generate(prompt)` — one-shot (used by Reranker)
+* `generate(prompt)` — one-shot
 * `is_available()` — checks Ollama server + model presence
 
 ### `llm/chat_engine.py` — `ChatEngine`
@@ -368,7 +366,7 @@ pipeline.full_reset()     # wipe Milvus collection + delete BM25 file + reset st
 
 ### Component init order (lazy)
 
-`embedder` → `vector_store` → `bm25_index` (load or build) → `hybrid_searcher` → `ollama_client` → `reranker` → `chat_engine`
+`embedder` → `vector_store` → `bm25_index` (load or build) → `hybrid_searcher` → `reranker` → `ollama_client` → `chat_engine`
 
 ---
 
@@ -464,7 +462,7 @@ docker compose down && rm -rf ~/milvus-volumes
 * [x] BM25 index (`retrieval/bm25_index.py`) — rank-bm25, disk persistence
 * [x] Hybrid retrieval with weighted score fusion (`retrieval/hybrid_search.py`)
 * [x] Metadata filtering (year, chunk_type, paper_id) via `/filter` CLI command
-* [x] LLM-based reranker (`retrieval/reranker.py`) — single Ollama call, robust parser
+* [x] Reranker (`retrieval/reranker.py`) — originally Ollama LLM; replaced in Phase 3 with `BAAI/bge-reranker-v2-m3` cross-encoder
 * [x] Author extraction from parsed PDFs (heuristic, best-effort)
 * [x] `search_with_scores()`, `fetch_all_content()`, `fetch_by_ids()` in VectorStore
 * [x] Milvus flush-on-insert + `count(*)` query fix
@@ -530,7 +528,10 @@ TOP_K_FINAL  = 5     # top chunks shown to the LLM
 HYBRID_VECTOR_WEIGHT = 0.6
 HYBRID_BM25_WEIGHT   = 0.4
 
-# Set to False to skip LLM reranking (faster, lower quality)
+# Cross-encoder reranker model
+RERANKER_MODEL = "BAAI/bge-reranker-v2-m3"
+
+# Set to False to skip reranking (faster, lower quality)
 RERANKER_ENABLED = True
 ```
 
@@ -669,5 +670,5 @@ git checkout dev
 - **pymilvus deprecation warnings**: The ORM-style `Collection`/`connections` API is deprecated in pymilvus 3.x. The codebase already uses `MilvusClient` — ignore any warnings from third-party libs.
 - **Author extraction**: Best-effort heuristic — works well for standard arXiv PDFs (names on page 1 between title and Abstract). May miss or over-include text for non-standard layouts. Already-ingested chunks with empty authors need a `/delete` + re-ingest to pick up the new extraction.
 - **BM25 index cold start**: On first startup after the Phase 2 update (or if `data/bm25_index.pkl` is missing), the pipeline fetches all content from Milvus and builds the index automatically. This adds a few seconds to startup but is silent.
-- **Reranker with small models**: Small Ollama models (≤ 7B) may produce malformed rankings. The fallback always returns a valid order so retrieval never silently fails — but quality may vary.
+- **Reranker model download**: First run loads `BAAI/bge-reranker-v2-m3` from HuggingFace (~568 MB). Download is automatic and cached; subsequent startups are instant.
 - **Docling model download**: First run of `parse_pdf()` downloads Docling's internal ML models (layout detection, OCR). This takes a few minutes on first use and is cached afterwards.

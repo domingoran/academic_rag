@@ -100,7 +100,7 @@ class RAGPipeline:
     @property
     def reranker(self) -> Reranker:
         if self._reranker is None:
-            self._reranker = Reranker(self.ollama_client)
+            self._reranker = Reranker()
         return self._reranker
 
     @property

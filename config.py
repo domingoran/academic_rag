@@ -66,5 +66,8 @@ HYBRID_BM25_WEIGHT: float = 0.4
 # BM25 index on-disk location (rebuilt automatically after ingestion)
 BM25_INDEX_PATH: Path = BASE_DIR / "data" / "bm25_index.pkl"
 
-# Set to False to skip the LLM reranking step (faster but lower quality)
+# Cross-encoder reranker model from HuggingFace (sentence-transformers CrossEncoder).
+RERANKER_MODEL: str = "BAAI/bge-reranker-v2-m3"
+
+# Set to False to skip the reranking step (faster but lower quality)
 RERANKER_ENABLED: bool = True
