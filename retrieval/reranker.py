@@ -1,63 +1,37 @@
 """
-LLM-based reranker — Phase 2.
+Cross-encoder reranker using BAAI/bge-reranker-v2-m3 — Phase 3.
 
-Asks the Ollama model to order candidate chunks by relevance to the query.
-A single generate() call is made with all candidates; the response is
-parsed as a comma-separated list of 1-based chunk numbers.
+Scores each (query, passage) pair with a HuggingFace cross-encoder and returns
+candidates sorted by descending relevance score.  No LLM call required.
 
-Fallback strategy
------------------
-If the LLM response cannot be parsed into a valid permutation the reranker
-returns the candidates in their original order so retrieval never silently
-degrades.  Partial orderings are handled: valid indices are placed first,
-then any missing ones are appended in their original relative order.
+Falls back to the original order on any error so retrieval never silently fails.
 """
 from __future__ import annotations
 
 import logging
-import re
 from typing import List
+
+from sentence_transformers import CrossEncoder
 
 import config
 from core.schemas import Chunk
-from llm.ollama_client import OllamaClient
 
 logger = logging.getLogger(__name__)
-
-# Maximum characters of each chunk shown to the reranker.
-# Keeps the prompt short while still giving the LLM enough signal.
-_PASSAGE_PREVIEW_CHARS = 400
-
-_PROMPT_TEMPLATE = """\
-You are a relevance judge for an academic paper retrieval system.
-
-Given the query and numbered passages below, rank the passages from MOST to \
-LEAST relevant to the query.
-
-Return ONLY a comma-separated list of the passage numbers in relevance order \
-(most relevant first).  Include every number exactly once.
-Example for 5 passages: 3, 1, 5, 2, 4
-
-Query: {query}
-
-Passages:
-{passages}
-
-Ranking (numbers only, comma-separated):"""
 
 
 class Reranker:
     """
-    Reranks a candidate list of Chunks using an Ollama LLM.
+    Reranks candidate chunks using a cross-encoder model.
 
     Usage::
 
-        reranker = Reranker(ollama_client)
+        reranker = Reranker()
         top5 = reranker.rerank("What is attention?", chunks)[:5]
     """
 
-    def __init__(self, ollama_client: OllamaClient) -> None:
-        self._client = ollama_client
+    def __init__(self) -> None:
+        logger.info("Loading reranker model: %s", config.RERANKER_MODEL)
+        self._model = CrossEncoder(config.RERANKER_MODEL)
 
     # ------------------------------------------------------------------ #
     # Public API                                                           #
@@ -69,61 +43,25 @@ class Reranker:
 
         Args:
             query:  The user's question.
-            chunks: Candidate chunks (typically 10–20 from hybrid search).
+            chunks: Candidate chunks (typically 10-20 from hybrid search).
 
         Returns:
-            The same chunks in a new order (most relevant first).
+            The same chunks sorted by cross-encoder score (most relevant first).
             Falls back to the input order on any error.
         """
         if len(chunks) <= 1:
             return chunks
 
-        passages = "\n\n".join(
-            f"[{i + 1}] {chunk.content[:_PASSAGE_PREVIEW_CHARS]}"
-            for i, chunk in enumerate(chunks)
-        )
-        prompt = _PROMPT_TEMPLATE.format(query=query, passages=passages)
+        pairs = [(query, chunk.content) for chunk in chunks]
 
         try:
-            response = self._client.generate(prompt)
-            order = self._parse_ranking(response, len(chunks))
+            scores = self._model.predict(pairs)
+            ranked = sorted(zip(scores, chunks), key=lambda x: x[0], reverse=True)
             logger.info(
-                "Reranker: %d candidates → parsed order %s", len(chunks), order[:5]
+                "Reranker: %d candidates scored; top score %.4f",
+                len(chunks), ranked[0][0],
             )
-            return [chunks[i] for i in order]
+            return [chunk for _, chunk in ranked]
         except Exception as exc:
             logger.warning("Reranker failed (%s) — using original order.", exc)
             return chunks
-
-    # ------------------------------------------------------------------ #
-    # Internal helpers                                                     #
-    # ------------------------------------------------------------------ #
-
-    @staticmethod
-    def _parse_ranking(response: str, n: int) -> List[int]:
-        """
-        Parse a comma-separated ranking into 0-based indices.
-
-        Args:
-            response: LLM output string, e.g. "3, 1, 5, 2, 4"
-            n:        Expected number of passages.
-
-        Returns:
-            0-based index list.  Always has length == n.
-        """
-        raw_nums = re.findall(r'\d+', response)
-        # Convert to 0-based, drop out-of-range values
-        seen: set = set()
-        result: List[int] = []
-        for tok in raw_nums:
-            idx = int(tok) - 1          # 1-based → 0-based
-            if 0 <= idx < n and idx not in seen:
-                result.append(idx)
-                seen.add(idx)
-
-        # Append any missing indices in original order
-        for idx in range(n):
-            if idx not in seen:
-                result.append(idx)
-
-        return result
